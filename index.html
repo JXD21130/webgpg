@@ -16,18 +16,34 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.
 #line{display:flex;gap:0}
 #ps{color:var(--acc);white-space:pre}
 #in{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--fg);font:inherit;caret-color:var(--acc)}
+#side{position:fixed;top:0;right:0;bottom:0;width:min(340px,88vw);background:var(--bar);border-left:1px solid #2a2e3f;transform:translateX(100%);transition:transform .2s;z-index:5;display:flex;flex-direction:column}
+#side.open{transform:none}
+#tab{position:absolute;left:-30px;top:44px;writing-mode:vertical-rl;padding:12px 6px;background:var(--bar);border:1px solid #2a2e3f;border-right:0;border-radius:6px 0 0 6px;color:var(--acc);font:inherit;cursor:pointer}
+#side h2{margin:0;padding:10px 12px;font-size:13px;font-weight:600;border-bottom:1px solid #2a2e3f}
+#keys{flex:1;overflow-y:auto;padding:4px 12px 12px}
+.k{padding:10px 0;border-bottom:1px solid #2a2e3f}
+.k .u{font-weight:600;word-break:break-word}
+.k .e{color:var(--ok);font-size:12px}
+.k .f{color:var(--dim);font-size:11px;word-break:break-all;margin:2px 0 8px}
+.k .r{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.k button{font:inherit;font-size:12px;padding:5px 6px;background:#252938;color:var(--fg);border:1px solid #343a50;border-radius:4px;cursor:pointer}
+.k button:hover{background:#2e3348}
+.k button.s{color:var(--err);border-color:#5a3340}
+@media (min-width:800px){body.open #t{padding-right:352px}}
+@media (prefers-reduced-motion:reduce){#side{transition:none}}
 </style>
 </head>
 <body>
 <div id="bar">gpg-web · OpenPGP.js · claves guardadas solo en este navegador (localStorage)</div>
 <div id="t"><div id="out"></div><div id="line"><span id="ps"></span><input id="in" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus></div></div>
+<aside id="side" aria-label="Claves guardadas"><button id="tab" type="button" aria-expanded="false" aria-controls="side">Claves</button><h2>Claves guardadas</h2><div id="keys"></div></aside>
 <script>
 const $=s=>document.querySelector(s),T=$('#t'),O=$('#out'),I=$('#in'),P=$('#ps');
 const PS='user@gpg:~$ ',KS='https://keys.openpgp.org';
 const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
 const sv=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
 let FS=ld('gpgfs',{}),KR=ld('gpgkeys',[]),LAST='',mode=null,busy=false;
-const sFS=()=>sv('gpgfs',FS),sKR=()=>sv('gpgkeys',KR);
+const sFS=()=>sv('gpgfs',FS),sKR=()=>{sv('gpgkeys',KR);renderPanel()};
 function print(t='',c=''){const d=document.createElement('div');d.className=c;d.textContent=t;O.appendChild(d);T.scrollTop=T.scrollHeight}
 const reset=()=>{P.textContent=PS;I.type='text'};
 const ask=(q,secret)=>new Promise((r,j)=>{mode={r,j,q,secret};P.textContent=q;I.type=secret?'password':'text';I.focus()});
@@ -435,6 +451,23 @@ async function report(sigs,r){let ok=true;
   catch{ok=false;print(x?`gpg: FIRMA INCORRECTA de "${uids(x.pub)[0]}"`:`gpg: no se puede comprobar la firma: falta la clave pública ${id} (prueba --recv-keys ${id})`,'err')}}
  return ok}
 
+/* ---------- panel lateral de claves ---------- */
+const SD=$('#side'),KL=$('#keys'),TB=$('#tab');
+TB.onclick=()=>{const o=SD.classList.toggle('open');document.body.classList.toggle('open',o);TB.setAttribute('aria-expanded',o)};
+const mk=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e};
+function flash(b,m){const o=b.dataset.o||(b.dataset.o=b.textContent);b.textContent=m;setTimeout(()=>b.textContent=o,1200)}
+async function cp(t,b){try{await navigator.clipboard.writeText(t);flash(b,'Copiada')}catch{flash(b,'No se pudo')}}
+function dl(t,n,b){const l=document.createElement('a');l.href=URL.createObjectURL(new Blob([t],{type:'text/plain'}));l.download=n;l.click();setTimeout(()=>URL.revokeObjectURL(l.href),2000);flash(b,'Descargada')}
+async function renderPanel(){let r;try{r=await ring()}catch{return}
+ KL.textContent='';
+ if(!r.length){KL.append(mk('p','dim','Aún no hay claves. Crea una con gpg --gen-key o impórtala con gpg --import.'));return}
+ for(const x of r){const k=x.pub,f=fp(k),id=f.slice(-8),d=mk('div','k');
+  d.append(mk('div','u',uids(k)[0]||'(sin UID)'),mk('div','e',x.e.priv?'Par completo: pública y privada':'Solo clave pública'),mk('div','f',f));
+  const row=mk('div','r'),add=(t,fn,c)=>{const b=mk('button',c,t);b.type='button';b.onclick=()=>fn(b);row.append(b)};
+  add('Copiar pública',b=>cp(x.e.pub,b));add('Descargar pública',b=>dl(x.e.pub,id+'-publica.asc',b));
+  if(x.e.priv){add('Copiar privada',b=>cp(x.e.priv,b),'s');add('Descargar privada',b=>dl(x.e.priv,id+'-privada.asc',b),'s')}
+  d.append(row);KL.append(d)}}
+
 /* ---------- entrada ---------- */
 const H=[];let hi=0;
 I.addEventListener('keydown',async e=>{
@@ -447,8 +480,8 @@ I.addEventListener('keydown',async e=>{
  else if(e.key==='ArrowUp'&&!mode){e.preventDefault();if(hi>0)I.value=H[--hi]}
  else if(e.key==='ArrowDown'&&!mode){e.preventDefault();I.value=hi<H.length-1?H[++hi]:(hi=H.length,'')}});
 I.addEventListener('paste',e=>{if(mode?.multi){e.preventDefault();const t=e.clipboardData.getData('text');mode.buf+=t+(t.endsWith('\n')?'':'\n');print(t.replace(/\n$/,''))}});
-document.addEventListener('click',()=>{if(!getSelection().toString())I.focus()});
-reset();
+document.addEventListener('click',e=>{if(!e.target.closest('#side')&&!getSelection().toString())I.focus()});
+reset();renderPanel();
 print('gpg-web: terminal GnuPG en tu navegador. Escribe help o gpg --help.','dim');
 print(KR.length?`Anillo de claves: ${KR.length} clave(s) guardada(s) en este navegador.`:'Anillo de claves vacío. Empieza con: gpg --gen-key','dim');
 if(typeof openpgp==='undefined')print('No se pudo cargar OpenPGP.js (¿sin conexión?). Recarga la página.','err');
