@@ -31,12 +31,30 @@ html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.
 .k button.s{color:var(--err);border-color:#5a3340}
 @media (min-width:800px){body.open #t{padding-right:352px}}
 @media (prefers-reduced-motion:reduce){#side{transition:none}}
+#modal{position:fixed;inset:0;background:rgba(10,11,18,.72);display:flex;align-items:center;justify-content:center;z-index:10}
+#modal[hidden]{display:none}
+#mf{width:min(380px,90vw);background:var(--bar);border:1px solid #343a50;border-radius:8px;padding:18px}
+#mf h3{margin:0 0 6px;font-size:15px}
+#mp{margin:0 0 12px;color:var(--dim);white-space:pre-line;word-break:break-word}
+#mi{width:100%;padding:8px 10px;background:var(--bg);color:var(--fg);border:1px solid #343a50;border-radius:4px;font:inherit}
+#mi:focus{outline:2px solid var(--acc);outline-offset:0}
+#me{min-height:1.45em;margin-top:6px;color:var(--err);font-size:12px}
+.mb{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+.mb button{font:inherit;padding:6px 14px;background:#252938;color:var(--fg);border:1px solid #343a50;border-radius:4px;cursor:pointer}
+.mb button[type=submit]{background:var(--acc);color:#14161f;border-color:var(--acc)}
+.mb button:disabled{opacity:.5;cursor:default}
+.tools{padding:10px 12px;border-bottom:1px solid #2a2e3f}
+#imp{font:inherit;font-size:12px;padding:6px 10px;background:#252938;color:var(--acc);border:1px solid var(--acc);border-radius:4px;cursor:pointer;width:100%}
+#imp:hover{background:#2e3348}
+#st{font-size:12px}
+#st div{margin-top:4px;word-break:break-word}
 </style>
 </head>
 <body>
 <div id="bar">gpg-web · OpenPGP.js · claves guardadas solo en este navegador (localStorage)</div>
 <div id="t"><div id="out"></div><div id="line"><span id="ps"></span><input id="in" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus></div></div>
-<aside id="side" aria-label="Claves guardadas"><button id="tab" type="button" aria-expanded="false" aria-controls="side">Claves</button><h2>Claves guardadas</h2><div id="keys"></div></aside>
+<aside id="side" aria-label="Claves guardadas"><button id="tab" type="button" aria-expanded="false" aria-controls="side">Claves</button><h2>Claves guardadas</h2><div class="tools"><button id="imp" type="button">Importar clave</button><div id="st" role="status"></div></div><div id="keys"></div></aside>
+<div id="modal" hidden><form id="mf" role="dialog" aria-modal="true" aria-labelledby="mt"><h3 id="mt"></h3><p id="mp"></p><input id="mi" type="password" autocomplete="off" placeholder="Contraseña de la clave privada" aria-label="Contraseña de la clave privada"><div id="me" role="alert"></div><div class="mb"><button type="button" id="mc">Cancelar</button><button type="submit" id="mo">Continuar</button></div></form></div>
 <script>
 const $=s=>document.querySelector(s),T=$('#t'),O=$('#out'),I=$('#in'),P=$('#ps');
 const PS='user@gpg:~$ ',KS='https://keys.openpgp.org';
@@ -314,14 +332,19 @@ async function unlock(e,o){const k=await openpgp.readPrivateKey({armoredKey:e.pr
  try{return await openpgp.decryptKey({privateKey:k,passphrase:p})}catch{throw Error('frase de contraseña incorrecta')}}
 function signer(r,o){const c=r.filter(x=>x.e.priv);const m=o.user?match(c,o.user):c;if(!m.length)throw Error('no hay clave secreta para firmar (genera una con --gen-key)');return m[0]}
 
-async function addKeys(txt){const b=txt.match(/-----BEGIN PGP (?:PUBLIC|PRIVATE) KEY BLOCK-----[\s\S]*?-----END PGP (?:PUBLIC|PRIVATE) KEY BLOCK-----/g)||[];
+const KRE=/-----BEGIN PGP (?:PUBLIC|PRIVATE) KEY BLOCK-----[\s\S]*?-----END PGP (?:PUBLIC|PRIVATE) KEY BLOCK-----/g;
+async function storeKey(a){const priv=/PRIVATE/.test(a),k=priv?await openpgp.readPrivateKey({armoredKey:a}):await rdK(a),pub=k.toPublic().armor(),f=fp(k);
+ let found=null;for(const e of KR)if(fp(await rdK(e.pub))===f)found=e;
+ let msg;
+ if(!found){msg=priv?'clave privada importada (incluye su pública)':'clave pública importada';KR.push({pub,priv:priv?a:undefined})}
+ else{const hp=!!found.priv;
+  msg=priv?(hp?'privada reemplazada por la importada':'privada emparejada con la pública que ya tenías'):(hp?'pública del mismo par que tu privada; actualizada':'ya la tenías; actualizada');
+  found.pub=pub;if(priv)found.priv=a}
+ sKR();return{k,f,msg}}
+async function addKeys(txt){const b=txt.match(KRE)||[];
  if(!b.length)throw Error('no se encontraron claves OpenPGP válidas');let n=0;
- for(const a of b){const priv=/PRIVATE/.test(a),k=priv?await openpgp.readPrivateKey({armoredKey:a}):await rdK(a);
-  const pub=k.toPublic().armor(),f=fp(k),ex=[];let found=null;
-  for(const e of KR)if(fp(await rdK(e.pub))===f)found=e;
-  if(found){found.pub=pub;if(priv)found.priv=a}else KR.push({pub,priv:priv?a:undefined});
-  print(`gpg: clave ${f.slice(-16)}: clave ${priv?'secreta':'pública'} importada (${uids(k)[0]||'sin UID'})`,'ok');n++}
- sKR();print(`gpg: Cantidad total procesada: ${n}`)}
+ for(const a of b){const r=await storeKey(a);print(`gpg: clave ${r.f.slice(-16)}: ${r.msg} (${uids(r.k)[0]||'sin UID'})`,'ok');n++}
+ print(`gpg: Cantidad total procesada: ${n}`)}
 
 async function genKey(name,email,al,p){
  const t=/^rsa/i.test(al)?{type:'rsa',rsaBits:+al.replace(/\D/g,'')||3072}:{type:'ecc',curve:'curve25519'};
@@ -458,6 +481,33 @@ const mk=(t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=nu
 function flash(b,m){const o=b.dataset.o||(b.dataset.o=b.textContent);b.textContent=m;setTimeout(()=>b.textContent=o,1200)}
 async function cp(t,b){try{await navigator.clipboard.writeText(t);flash(b,'Copiada')}catch{flash(b,'No se pudo')}}
 function dl(t,n,b){const l=document.createElement('a');l.href=URL.createObjectURL(new Blob([t],{type:'text/plain'}));l.download=n;l.click();setTimeout(()=>URL.revokeObjectURL(l.href),2000);flash(b,'Descargada')}
+function passModal(title,msg,prot,check){
+ const M=$('#modal'),F=$('#mf'),In=$('#mi'),Er=$('#me'),Ok=$('#mo');
+ $('#mt').textContent=title;$('#mp').textContent=msg;
+ In.hidden=!prot;In.value='';Er.textContent='';Ok.disabled=false;M.hidden=false;(prot?In:Ok).focus();
+ return new Promise(done=>{
+  const esc=e=>{if(e.key==='Escape')close(false)};
+  const close=ok=>{M.hidden=true;In.value='';F.onsubmit=null;$('#mc').onclick=null;M.onclick=null;document.removeEventListener('keydown',esc,true);done(ok)};
+  document.addEventListener('keydown',esc,true);
+  $('#mc').onclick=()=>close(false);M.onclick=e=>{if(e.target===M)close(false)};
+  F.onsubmit=async e=>{e.preventDefault();
+   if(prot){Ok.disabled=true;Er.textContent='';try{await check(In.value)}catch{Er.textContent='Contraseña incorrecta.';Ok.disabled=false;In.select();return}}
+   close(true)}})}
+async function gate(x,verb,run){
+ const key=await openpgp.readPrivateKey({armoredKey:x.e.priv}),prot=!key.isDecrypted(),n=uids(x.pub)[0]||fp(x.pub).slice(-16);
+ if(await passModal(verb+' clave privada',n+'\n'+(prot?'Escribe la contraseña de esta clave para continuar.':'Esta clave no tiene contraseña: quien consiga el archivo podrá usarla. ¿Continuar?'),prot,p=>openpgp.decryptKey({privateKey:key,passphrase:p})))await run()}
+const pickFiles=()=>new Promise(r=>{const f=document.createElement('input');f.type='file';f.multiple=true;f.onchange=()=>r([...f.files]);f.oncancel=()=>r([]);f.click()});
+async function importKeys(){
+ const files=await pickFiles();if(!files.length)return;const out=[];
+ for(const f of files){const bl=(await f.text()).match(KRE)||[];
+  if(!bl.length){out.push([`${f.name}: no contiene claves OpenPGP válidas`,'err']);continue}
+  for(const b of bl){try{
+   if(/PRIVATE/.test(b)){const k=await openpgp.readPrivateKey({armoredKey:b});
+    if(!k.isDecrypted()&&!await passModal('Importar clave privada',(uids(k)[0]||fp(k).slice(-16))+'\nEscribe la contraseña de esta clave para importarla.',true,p=>openpgp.decryptKey({privateKey:k,passphrase:p}))){out.push([`${f.name}: importación cancelada`,'err']);continue}}
+   const r=await storeKey(b);out.push([`${uids(r.k)[0]||r.f.slice(-16)}: ${r.msg}`,'ok'])
+  }catch(e){out.push([`${f.name}: ${e.message}`,'err'])}}}
+ const S=$('#st');S.textContent='';out.forEach(([t,c])=>S.append(mk('div',c,t)))}
+$('#imp').onclick=importKeys;
 async function renderPanel(){let r;try{r=await ring()}catch{return}
  KL.textContent='';
  if(!r.length){KL.append(mk('p','dim','Aún no hay claves. Crea una con gpg --gen-key o impórtala con gpg --import.'));return}
@@ -465,7 +515,7 @@ async function renderPanel(){let r;try{r=await ring()}catch{return}
   d.append(mk('div','u',uids(k)[0]||'(sin UID)'),mk('div','e',x.e.priv?'Par completo: pública y privada':'Solo clave pública'),mk('div','f',f));
   const row=mk('div','r'),add=(t,fn,c)=>{const b=mk('button',c,t);b.type='button';b.onclick=()=>fn(b);row.append(b)};
   add('Copiar pública',b=>cp(x.e.pub,b));add('Descargar pública',b=>dl(x.e.pub,id+'-publica.asc',b));
-  if(x.e.priv){add('Copiar privada',b=>cp(x.e.priv,b),'s');add('Descargar privada',b=>dl(x.e.priv,id+'-privada.asc',b),'s')}
+  if(x.e.priv){add('Copiar privada',b=>gate(x,'Copiar',()=>cp(x.e.priv,b)),'s');add('Descargar privada',b=>gate(x,'Descargar',()=>dl(x.e.priv,id+'-privada.asc',b)),'s')}
   d.append(row);KL.append(d)}}
 
 /* ---------- entrada ---------- */
@@ -480,7 +530,7 @@ I.addEventListener('keydown',async e=>{
  else if(e.key==='ArrowUp'&&!mode){e.preventDefault();if(hi>0)I.value=H[--hi]}
  else if(e.key==='ArrowDown'&&!mode){e.preventDefault();I.value=hi<H.length-1?H[++hi]:(hi=H.length,'')}});
 I.addEventListener('paste',e=>{if(mode?.multi){e.preventDefault();const t=e.clipboardData.getData('text');mode.buf+=t+(t.endsWith('\n')?'':'\n');print(t.replace(/\n$/,''))}});
-document.addEventListener('click',e=>{if(!e.target.closest('#side')&&!getSelection().toString())I.focus()});
+document.addEventListener('click',e=>{if(!e.target.closest('#side,#modal')&&!getSelection().toString())I.focus()});
 reset();renderPanel();
 print('gpg-web: terminal GnuPG en tu navegador. Escribe help o gpg --help.','dim');
 print(KR.length?`Anillo de claves: ${KR.length} clave(s) guardada(s) en este navegador.`:'Anillo de claves vacío. Empieza con: gpg --gen-key','dim');
