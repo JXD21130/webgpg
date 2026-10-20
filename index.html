@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gpg — terminal web</title>
+<script src="https://cdn.jsdelivr.net/npm/openpgp@5.11.2/dist/openpgp.min.js"></script>
+<style>
+:root{--bg:#14161f;--bar:#1c1f2b;--fg:#d6d9e5;--dim:#7c8197;--ok:#7bd88f;--err:#ff7b86;--acc:#f2b85b}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 ui-monospace,"JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace}
+#bar{background:var(--bar);padding:6px 12px;color:var(--dim);font-size:12px;border-bottom:1px solid #2a2e3f}
+#t{height:calc(100% - 29px);overflow-y:auto;padding:10px 12px}
+#out div{white-space:pre-wrap;word-break:break-all;min-height:1.45em}
+.dim{color:var(--dim)}.ok{color:var(--ok)}.err{color:var(--err)}.p{color:var(--acc)}
+#line{display:flex;gap:0}
+#ps{color:var(--acc);white-space:pre}
+#in{flex:1;min-width:0;background:none;border:0;outline:0;color:var(--fg);font:inherit;caret-color:var(--acc)}
+</style>
+</head>
+<body>
+<div id="bar">gpg-web · OpenPGP.js · claves guardadas solo en este navegador (localStorage)</div>
+<div id="t"><div id="out"></div><div id="line"><span id="ps"></span><input id="in" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus></div></div>
+<script>
+const $=s=>document.querySelector(s),T=$('#t'),O=$('#out'),I=$('#in'),P=$('#ps');
+const PS='user@gpg:~$ ',KS='https://keys.openpgp.org';
+const ld=(k,d)=>{try{return JSON.parse(localStorage.getItem(k))??d}catch{return d}};
+const sv=(k,v)=>localStorage.setItem(k,JSON.stringify(v));
+let FS=ld('gpgfs',{}),KR=ld('gpgkeys',[]),LAST='',mode=null,busy=false;
+const sFS=()=>sv('gpgfs',FS),sKR=()=>sv('gpgkeys',KR);
+function print(t='',c=''){const d=document.createElement('div');d.className=c;d.textContent=t;O.appendChild(d);T.scrollTop=T.scrollHeight}
+const reset=()=>{P.textContent=PS;I.type='text'};
+const ask=(q,secret)=>new Promise((r,j)=>{mode={r,j,q,secret};P.textContent=q;I.type=secret?'password':'text';I.focus()});
+const stdin=()=>{print('(escribe o pega el texto y termina con Ctrl+D; Ctrl+C cancela)','dim');return new Promise((r,j)=>{mode={r,j,multi:true,buf:''};P.textContent=''})};
+
+/* ---------- línea de comandos ---------- */
+function tok(s){const o=[];let c='',q=null,h=false;
+ for(let i=0;i<s.length;i++){const ch=s[i];
+  if(q){if(ch===q)q=null;else c+=ch;h=true}
+  else if(ch==='"'||ch==="'"){q=ch;h=true}
+  else if(/\s/.test(ch)){if(h)o.push(c);c='';h=false}
+  else if(ch==='|'||ch==='>'){if(h)o.push(c);c='';h=false;if(ch==='>'&&s[i+1]==='>'){o.push({op:'>>'});i++}else o.push({op:ch})}
+  else{c+=ch;h=true}}
+ if(h)o.push(c);return o}
+
+async function run(line){
+ const t=tok(line);if(!t.length)return;
+ const st=[[]];let rd=null;
+ for(let i=0;i<t.length;i++){const x=t[i];if(x.op==='|')st.push([]);else if(x.op)rd={app:x.op==='>>',f:t[++i]};else st[st.length-1].push(x)}
+ let inp=null;busy=true;
+ try{
+  for(const [cmd,...a] of st){
+   const fn=CMD[cmd];
+   if(!fn){print(`${cmd}: orden no disponible. Esta terminal solo admite: ${Object.keys(CMD).join(', ')}`,'err');return}
+   inp=(await fn(a,inp))??'';
+  }
+  LAST=inp;
+  if(rd){if(!rd.f)throw Error('falta el nombre de archivo tras >');FS[rd.f]=(rd.app?FS[rd.f]||'':'')+inp;sFS()}
+  else if(inp)print(inp.replace(/\n$/,''));
+ }catch(e){print((e.message||e).toString().startsWith('gpg')?e.message:'gpg: '+(e.message||e),'err')}
+ finally{busy=false;reset()}
+}
+
+const getF=n=>{if(!(n in FS))throw Error(`${n}: no existe el archivo (usa upload o cat > ${n})`);return FS[n]};
+const CMD={
+ echo:a=>{let n=0;if(a[0]==='-n'){n=1;a.shift()}return a.join(' ')+(n?'':'\n')},
+ cat:async(a,i)=>a.length?a.map(getF).join(''):(i??await stdin()),
+ ls:()=>Object.keys(FS).join('  ')+'\n',
+ rm:a=>{a.forEach(n=>{getF(n);delete FS[n]});sFS()},
+ clear:()=>{O.innerHTML=''},
+ upload:()=>new Promise(r=>{const f=document.createElement('input');f.type='file';f.multiple=true;
+  f.onchange=async()=>{for(const x of f.files){FS[x.name]=await x.text();print('subido: '+x.name,'ok')}sFS();r('')};
+  f.oncancel=()=>r('');f.click()}),
+ download:(a,i)=>{const n=a[0]||'salida.txt',txt=i!=null&&i!==''?i:getF(n);
+  const l=document.createElement('a');l.href=URL.createObjectURL(new Blob([txt],{type:'text/plain'}));l.download=n;l.click();
+  print(`descargando ${n}`,'ok');return ''},
+ copy:async(a,i)=>{const txt=a[0]?getF(a[0]):(i!=null&&i!==''?i:LAST);
+  try{await navigator.clipboard.writeText(txt);print(`copiado al portapapeles (${txt.length} caracteres)`,'ok')}
+  catch{print('no se pudo acceder al portapapeles; usa download','err')}return ''},
+ help:()=>HELP,
+ gpg:(a,i)=>gpg(a,i)
+};
+const HELP=`Órdenes del sistema:
+  gpg ...            emulación de GnuPG (gpg --help para ver las opciones)
+  echo, cat, ls, rm  gestión de archivos virtuales (guardados en este navegador)
+  upload             sube archivos de tu dispositivo (p. ej. claves .asc)
+  download <archivo> descarga un archivo; también: gpg --export -a | download pub.asc
+  copy [archivo]     copia al portapapeles un archivo o la última salida; admite tuberías
+  clear              limpia la pantalla
+Se admiten tuberías (|) y redirecciones (>, >>). Con gpg sin archivo se lee de la entrada:
+escribe o pega el texto y pulsa Ctrl+D.`;
+
+/* ---------- gpg ---------- */
+const CM={'--gen-key':'gen','--generate-key':'gen','--full-generate-key':'gen','--full-gen-key':'gen','--quick-generate-key':'qgen','--quick-gen-key':'qgen',
+'-k':'list','--list-keys':'list','--list-public-keys':'list','--list-sigs':'list','--check-sigs':'list','-K':'lists','--list-secret-keys':'lists','--fingerprint':'fpr',
+'--export':'exp','--export-secret-keys':'exps','--export-secret-subkeys':'exps','--import':'imp','--fast-import':'imp',
+'--delete-keys':'del','--delete-key':'del','--delete-secret-keys':'dels','--delete-secret-and-public-key':'delb',
+'-s':'sign','--sign':'sign','--clearsign':'clear','--clear-sign':'clear','-b':'dsign','--detach-sign':'dsign',
+'-e':'enc','--encrypt':'enc','-c':'sym','--symmetric':'sym','--aes-encrypt':'aese','--aes-decrypt':'aesd','-d':'dec','--decrypt':'dec','--verify':'ver',
+'--send-keys':'send','--recv-keys':'recv','--receive-keys':'recv','--refresh-keys':'refresh','--search-keys':'srch',
+'--gen-revoke':'rev','--generate-revocation':'rev','--passwd':'pw','--version':'ver0','-h':'help','--help':'help','--advanced-help':'ahelp',
+'--edit-key':'x','--card-edit':'x','--list-packets':'x','--import-ownertrust':'x','--export-ownertrust':'x','--lsign-key':'x','--sign-key':'x'};
+const VAL={'-o':'out','--output':'out','-r':'rec','--recipient':'rec','-u':'user','--local-user':'user','--default-key':'user','--keyserver':'ks','--passphrase':'pass',
+'--pinentry-mode':'_','--cipher-algo':'_','--digest-algo':'_','--compress-algo':'_','--homedir':'_','--s2k-cipher-algo':'_','--status-fd':'_','--logger-fd':'_'};
+const GH=`Uso: gpg [opciones] [archivos]
+Órdenes:
+ -s, --sign           firmar              --clearsign       firma en texto claro
+ -b, --detach-sign    firma separada      -e, --encrypt     cifrar (-r destinatario)
+ -c, --symmetric      cifrado simétrico   -d, --decrypt     descifrar
+     --aes-encrypt    cifrar con AES-256 en formato PGP MESSAGE (frase de contraseña)
+     --aes-decrypt    descifrar un mensaje PGP cifrado con frase de contraseña
+     --verify         verificar firmas    -se               firmar y cifrar
+     --gen-key / --full-generate-key / --quick-generate-key "Nombre <correo>" [ed25519|rsa3072|rsa4096]
+ -k, --list-keys   -K, --list-secret-keys  --fingerprint  --list-sigs
+     --export [id]   --export-secret-keys [id]   --import [archivo]
+     --delete-keys / --delete-secret-keys / --delete-secret-and-public-key id
+     --gen-revoke id   --passwd id
+     --send-keys id   --recv-keys id   --refresh-keys   --search-keys correo|id
+Opciones: -a/--armor, -o/--output archivo, -r/--recipient id, -u/--local-user id,
+ --passphrase texto, --batch, --yes, --version
+Ayuda detallada y con ejemplos: gpg --advanced-help
+La salida siempre es ASCII armor. Las claves están en este navegador.`;
+
+const AH=`GUÍA COMPLETA DE GPG (explicada fácil)
+
+══ 1. QUÉ ES GPG Y QUÉ ES UNA CLAVE ══
+GPG sirve para tres cosas: CIFRAR (solo el destinatario puede leer el mensaje),
+FIRMAR (demostrar que algo lo escribiste tú y que nadie lo cambió) y GESTIONAR
+tus claves. Todo se basa en un PAR de claves que se crean a la vez:
+  Clave pública   La repartes a todo el mundo. Otros la usan para cifrarte
+                  mensajes y para comprobar tus firmas.
+  Clave privada   Solo tuya. Sirve para descifrar y para firmar. Está protegida
+                  con una frase de contraseña. Nunca la compartas.
+  Huella          Código único de 40 caracteres que identifica una clave. Para
+                  saber si una clave es realmente de alguien, compara la huella.
+  UID             Nombre y correo de la clave, por ejemplo Ana <ana@ejemplo.com>.
+  Id de clave     Los últimos 16 caracteres de la huella (también vale la huella
+                  entera). Sirve para señalar una clave en los comandos.
+Para elegir una clave en un comando puedes escribir parte del nombre o del correo
+(ana), o la huella/id (A1B2C3D4E5F60718).
+
+══ 2. CÓMO SE USA ESTA TERMINAL ══
+  Tuberías       echo "hola" | gpg -e -r ana       (la salida de uno entra al otro)
+  Redirección    gpg --export -a > publica.asc     (guarda en un archivo virtual)
+  Sin archivo    Si un comando necesita texto y no le das archivo, escribe o pega
+                 el texto y termina con Ctrl+D. Ctrl+C cancela. Ctrl+L limpia.
+  Archivos       Son virtuales y se guardan en este navegador. Mira la lista con
+                 ls, léelos con cat, bórralos con rm, súbelos desde tu equipo con
+                 upload y bájalos con download nombre.
+  Copiar         Cualquier salida: ... | copy      Descargar: ... | download x.asc
+  Historial      Flechas arriba y abajo.
+Importante: todo se guarda SOLO en este navegador. Si borras los datos del sitio,
+pierdes las claves. Haz copia de seguridad (sección 5).
+
+══ 3. CREAR CLAVES ══
+  gpg --gen-key                      Asistente: te pregunta nombre, correo, tipo y
+                                     frase. (También --full-generate-key.)
+  gpg --quick-generate-key "Ana <ana@ejemplo.com>" [tipo]
+                                     Rápido, en una sola línea.
+Tipos: ed25519 (por defecto, moderno y rápido), rsa3072 o rsa4096 (clásicos,
+más lentos de generar). La frase de contraseña protege tu clave privada: elige
+una larga que recuerdes. Si la dejas vacía, la clave queda sin protección.
+
+══ 4. VER TUS CLAVES ══
+  gpg -k   (--list-keys)             Lista las claves públicas (las tuyas y las
+                                     importadas). pub = clave pública, uid = nombre,
+                                     sub = subclave que usa el cifrado.
+  gpg -K   (--list-secret-keys)      Lista solo las claves privadas (sec/ssb).
+  gpg --fingerprint [clave]          Muestra la huella completa.
+  gpg --list-sigs [clave]            Lista con las firmas de cada UID.
+Añade un nombre al final para filtrar: gpg -k ana
+
+══ 5. EXPORTAR, IMPORTAR Y COPIA DE SEGURIDAD ══
+  gpg --export -a [clave]            Muestra tu clave PÚBLICA en texto. Es la que
+                                     compartes. Sin nombre exporta todas.
+  gpg --export-secret-keys -a [clave]  Muestra tu clave PRIVADA (sigue protegida por
+                                     la frase). Guárdala en un lugar seguro.
+  gpg --import [archivo]             Añade una clave de otra persona (o recupera la
+                                     tuya). Sin archivo, pega el texto y Ctrl+D.
+Copia de seguridad recomendada (hazla al crear la clave):
+  gpg --export -a | download publica.asc
+  gpg --export-secret-keys -a | download privada.asc
+  gpg --gen-revoke ana | download revocacion.asc
+Para restaurar: upload (elige los .asc) y luego gpg --import privada.asc
+
+══ 6. CIFRAR Y DESCIFRAR ══
+  gpg -e -r ana archivo.txt          Cifra para Ana con SU clave pública. Solo ella
+                                     podrá abrirlo. Necesitas tener su clave
+                                     importada. Puedes poner varios -r.
+  gpg -d mensaje.gpg                 Descifra con tu clave privada (pide la frase).
+  gpg -c archivo.txt                 Cifra con una contraseña, sin claves (OpenPGP).
+  gpg --aes-encrypt archivo.txt      Igual, pero fijando AES-256. Salida PGP MESSAGE.
+  gpg --aes-decrypt archivo.aes      Descifra lo anterior (y también lo de -c).
+  gpg -se -r ana archivo.txt         Firma Y cifra a la vez (-s + -e).
+Regla fácil: para que OTRO lea → -e con su clave pública. Para que lo leas TÚ con
+una contraseña → -c o --aes-encrypt.
+
+══ 7. FIRMAR Y VERIFICAR ══
+  gpg -s archivo.txt                 Firma y guarda el contenido junto a la firma.
+  gpg --clearsign archivo.txt        Firma en texto claro: el texto sigue legible y
+                                     la firma va debajo. Ideal para correos.
+  gpg -b archivo.txt                 Firma separada: crea archivo.txt.sig y no toca
+                                     el original.
+  gpg --verify firma.sig archivo.txt Comprueba una firma separada contra su archivo.
+  gpg --verify firmado.asc           Comprueba un mensaje firmado o en texto claro.
+"Firma correcta" = lo firmó esa clave y nadie lo modificó. Si dice que falta la
+clave pública, impórtala o búscala con --recv-keys.
+Para firmar con una clave concreta usa -u ana.
+
+══ 8. SERVIDOR DE CLAVES (keys.openpgp.org) ══
+  gpg --send-keys ana                Sube tu clave PÚBLICA. Te ofrece enviar un correo
+                                     de verificación: ábrelo y confirma, y así la
+                                     clave podrá encontrarse por tu correo.
+  gpg --recv-keys HUELLA             Descarga e importa una clave (huella de 40, id de
+                                     16 o correo).
+  gpg --search-keys correo           Busca y muestra los datos, sin importar.
+  gpg --refresh-keys                 Actualiza todas tus claves desde el servidor.
+Solo se sube la parte pública. Tu clave privada nunca sale de este navegador.
+
+══ 9. MANTENIMIENTO ══
+  gpg --passwd ana                   Cambia la frase de contraseña de tu clave.
+  gpg --gen-revoke ana               Muestra el certificado de revocación (solo claves
+                                     creadas aquí). Si pierdes la clave, sirve para
+                                     avisar de que ya no es válida. Guárdalo aparte.
+  gpg --delete-keys ana              Borra una clave pública.
+  gpg --delete-secret-keys ana       Borra la parte privada.
+  gpg --delete-secret-and-public-key ana   Borra el par completo.
+Un borrado es definitivo y pide confirmación. Si vas a borrar una clave con parte
+privada, haz antes la copia de seguridad.
+
+══ 10. OPCIONES ══
+  -a, --armor            Texto armado (aquí la salida siempre lo es).
+  -o, --output archivo   Guarda el resultado en ese archivo. Con -o - lo muestra.
+  -r, --recipient clave  Destinatario al cifrar (repetible).
+  -u, --local-user clave Clave con la que firmar.
+  --passphrase texto     Da la frase sin que la pregunte (visible en pantalla; solo
+                         para pruebas).
+  --batch, --yes         No pide confirmaciones.
+  --version, --help      Versión y ayuda corta.
+Si pasas un archivo sin -o, el resultado se guarda con otro nombre: .gpg (firmar,
+cifrar), .sig (firma separada), .asc (texto claro) o .aes. Sin archivo, sale por
+pantalla.
+
+══ 11. EJEMPLOS COMPLETOS ══
+A) Empezar desde cero
+   gpg --quick-generate-key "Ana <ana@ejemplo.com>"
+   gpg -k
+   gpg --export -a | download ana-publica.asc
+B) Enviar un mensaje secreto a Bruno
+   upload                              (elige la clave pública de Bruno)
+   gpg --import bruno.asc
+   echo "hola Bruno" | gpg -e -r bruno > mensaje.asc
+   cat mensaje.asc | copy              (y se lo envías)
+C) Firmar un documento y comprobarlo
+   upload                              (elige informe.txt)
+   gpg -b informe.txt
+   gpg --verify informe.txt.sig informe.txt
+D) Hacer que te encuentren
+   gpg --send-keys ana
+E) Guardar un secreto con contraseña
+   echo "mi dato" | gpg --aes-encrypt > secreto.aes
+   gpg --aes-decrypt secreto.aes
+
+══ 12. ERRORES FRECUENTES ══
+  no existe el archivo           Súbelo antes con upload o créalo con cat > nombre.
+  no hay destinatarios           Falta -r clave al cifrar.
+  clave pública no encontrada    Impórtala (--import) o descárgala (--recv-keys).
+  no hay clave secreta           Ese mensaje no es para ninguna clave tuya.
+  frase de contraseña incorrecta Reintenta; si la olvidaste, no hay forma de recuperarla.
+  no se pudo conectar            Falla la red o el servidor de claves no responde.
+
+══ 13. LÍMITES ══
+Esto es una emulación de GnuPG que corre en el navegador. No están: --edit-key,
+tarjetas inteligentes, --list-packets, el modelo de confianza ni otros servidores
+de claves. La salida es siempre texto armado, no binario.`;
+
+const rdK=a=>openpgp.readKey({armoredKey:a});
+async function ring(){const r=[];for(const e of KR)r.push({e,pub:await rdK(e.pub)});return r}
+const fp=k=>k.getFingerprint().toUpperCase();
+const uids=k=>k.users.map(u=>u.userID?.userID).filter(Boolean);
+function match(r,q){const raw=q.toLowerCase(),h=q.replace(/^0x/i,'').replace(/\s/g,'').toUpperCase();
+ return r.filter(x=>{const f=fp(x.pub);return(h.length>=8&&f.endsWith(h))||uids(x.pub).some(u=>u.toLowerCase().includes(raw))})}
+function pick(r,ids,priv){if(!ids.length)return priv?r.filter(x=>x.e.priv):r;const s=new Set();
+ ids.forEach(q=>{const m=match(r,q).filter(x=>!priv||x.e.priv);if(!m.length)throw Error(`${q}: no se encontró la clave`+(priv?' secreta':''));m.forEach(x=>s.add(x))});return[...s]}
+const algo=k=>{const i=k.getAlgorithmInfo();return i.curve?(i.curve==='curve25519'?'cv25519':i.curve):'rsa'+i.bits};
+const day=d=>d.toISOString().slice(0,10);
+function fmtKey(x,sec,sigs){const k=x.pub,l=[`${sec?'sec':'pub'}   ${algo(k)} ${day(k.getCreationTime())} [SC]`,'      '+fp(k)];
+ uids(k).forEach(u=>l.push(`uid           [${x.e?.priv?'ultimate':'unknown'}] ${u}`+(sigs?`\nsig 3        ${fp(k).slice(-16)} ${day(k.getCreationTime())}  autofirma`:'')));
+ k.subkeys.forEach(s=>l.push(`${sec?'ssb':'sub'}   ${algo(s)} ${day(s.getCreationTime())} [E]`));return l.join('\n')}
+const HDR='/home/user/.gnupg/pubring.kbx\n-----------------------------\n';
+const emit=(o,t,def)=>{const n=o.out==='-'?null:(o.out||def||null);if(n){FS[n]=t;sFS();print(`gpg: escrito en ${n}`,'dim');return''}return t};
+const yes=async(o,q)=>{if(o.yes||o.batch)return true;return /^(s|si|sí|y|yes)$/i.test((await ask(q+' (s/N) ')).trim())};
+
+async function getData(o,inp,n=0){if(o.pos.length>n)return o.pos.slice(n).map(getF).join('');return inp!=null&&inp!==''?inp:await stdin()}
+async function pass(o,q,confirm){if(o.pass!=null)return o.pass;const p=await ask(q,true);if(confirm&&p!==await ask('Repite la frase de contraseña: ',true))throw Error('las frases no coinciden');return p}
+async function unlock(e,o){const k=await openpgp.readPrivateKey({armoredKey:e.priv});if(k.isDecrypted())return k;
+ const p=await pass(o,`Frase de contraseña para ${fp(k).slice(-16)}: `);
+ try{return await openpgp.decryptKey({privateKey:k,passphrase:p})}catch{throw Error('frase de contraseña incorrecta')}}
+function signer(r,o){const c=r.filter(x=>x.e.priv);const m=o.user?match(c,o.user):c;if(!m.length)throw Error('no hay clave secreta para firmar (genera una con --gen-key)');return m[0]}
+
+async function addKeys(txt){const b=txt.match(/-----BEGIN PGP (?:PUBLIC|PRIVATE) KEY BLOCK-----[\s\S]*?-----END PGP (?:PUBLIC|PRIVATE) KEY BLOCK-----/g)||[];
+ if(!b.length)throw Error('no se encontraron claves OpenPGP válidas');let n=0;
+ for(const a of b){const priv=/PRIVATE/.test(a),k=priv?await openpgp.readPrivateKey({armoredKey:a}):await rdK(a);
+  const pub=k.toPublic().armor(),f=fp(k),ex=[];let found=null;
+  for(const e of KR)if(fp(await rdK(e.pub))===f)found=e;
+  if(found){found.pub=pub;if(priv)found.priv=a}else KR.push({pub,priv:priv?a:undefined});
+  print(`gpg: clave ${f.slice(-16)}: clave ${priv?'secreta':'pública'} importada (${uids(k)[0]||'sin UID'})`,'ok');n++}
+ sKR();print(`gpg: Cantidad total procesada: ${n}`)}
+
+async function genKey(name,email,al,p){
+ const t=/^rsa/i.test(al)?{type:'rsa',rsaBits:+al.replace(/\D/g,'')||3072}:{type:'ecc',curve:'curve25519'};
+ print('gpg: generando la clave, puede tardar (RSA puede llevar varios segundos)...','dim');
+ const r=await openpgp.generateKey({...t,userIDs:[{name,email:email||undefined}],passphrase:p||undefined,format:'armored'});
+ KR.push({pub:r.publicKey,priv:r.privateKey,rev:r.revocationCertificate});sKR();
+ const k=await rdK(r.publicKey);print(`gpg: clave ${fp(k).slice(-16)} marcada como de confianza absoluta`,'ok');
+ print('gpg: certificado de revocación disponible con --gen-revoke','dim');
+ return fmtKey({pub:k,e:{priv:1}},true)}
+
+async function gpg(args,inp){
+ const A=[];for(const x of args){if(/^-[a-zA-Z]{2,}$/.test(x))for(const c of x.slice(1))A.push('-'+c);else A.push(x)}
+ const o={cmds:[],pos:[],rec:[]};
+ for(let i=0;i<A.length;i++){let x=A[i],v;
+  if(x.startsWith('--')&&x.includes('=')){v=x.slice(x.indexOf('=')+1);x=x.slice(0,x.indexOf('='))}
+  if(CM[x]){o.cmds.push(CM[x]);continue}
+  if(x in VAL){if(v===undefined)v=A[++i];const k=VAL[x];k==='rec'?o.rec.push(v):o[k]=v;continue}
+  if(['-a','--armor','-v','--verbose','-q','--quiet','--no-tty','--no-greeting','--no-verbose'].includes(x))continue;
+  if(x==='--yes')o.yes=1;else if(x==='--batch')o.batch=1;
+  else if(x.startsWith('-')&&x!=='-')print(`gpg: opción ignorada o no implementada: ${x}`,'dim');
+  else o.pos.push(x)}
+ let c=o.cmds.includes('sign')&&o.cmds.includes('enc')?'se':o.cmds[0]||'dec';
+ if(!o.cmds.length&&!o.pos.length&&inp==null)return GH;
+ const r=await ring();
+ switch(c){
+ case 'help':return GH;
+ case 'ahelp':return AH;
+ case 'ver0':return 'gpg (GnuPG web) 2.4.x — emulación con OpenPGP.js 5.11.2\nAlgoritmos: RSA, ECDSA/EdDSA (curve25519), ECDH, AES, SHA-2\nNo es el GnuPG original: corre entero en tu navegador.';
+ case 'x':throw Error('esa orden de GnuPG aún no está implementada en la versión web');
+ case 'gen':{print('Selecciona el tipo de clave: ed25519 (por defecto), rsa3072 o rsa4096');
+  const n=(await ask('Nombre real: ')).trim(),e=(await ask('Dirección de correo: ')).trim(),a=(await ask('Tipo [ed25519]: ')).trim()||'ed25519';
+  if(!n&&!e)throw Error('hace falta un nombre o un correo');
+  const p=await pass(o,'Frase de contraseña (vacía = sin protección): ',true);return genKey(n,e,a,p)}
+ case 'qgen':{const u=o.pos[0];if(!u)throw Error('uso: --quick-generate-key "Nombre <correo>" [ed25519|rsa3072|rsa4096]');
+  const m=u.match(/^(.*?)\s*<(.+)>$/),p=await pass(o,'Frase de contraseña (vacía = sin protección): ',!o.batch);
+  return genKey(m?m[1]:u,m?m[2]:'',o.pos[1]||'ed25519',p)}
+ case 'list':case 'fpr':{const s=pick(r,o.pos);if(!s.length)return'(el anillo de claves está vacío)';
+  return HDR+s.map(x=>fmtKey(x,false,o.cmds.includes('list')&&A.includes('--list-sigs'))).join('\n\n')+'\n'}
+ case 'lists':{const s=pick(r,o.pos,true);if(!s.length)return'(no hay claves secretas)';return HDR+s.map(x=>fmtKey(x,true)).join('\n\n')+'\n'}
+ case 'exp':{const s=pick(r,o.pos);if(!s.length)throw Error('no hay nada que exportar');return emit(o,s.map(x=>x.e.pub).join('\n'))}
+ case 'exps':{const s=pick(r,o.pos,true);if(!s.length)throw Error('no hay claves secretas');return emit(o,s.map(x=>x.e.priv).join('\n'))}
+ case 'imp':return addKeys(await getData(o,inp)).then(()=>'');
+ case 'del':case 'dels':case 'delb':{if(!o.pos.length)throw Error('indica una clave');
+  for(const x of pick(r,o.pos)){print(fmtKey(x,!!x.e.priv));
+   if(c==='del'&&x.e.priv)throw Error('hay una clave secreta para esta clave pública; usa --delete-secret-keys primero');
+   if(c==='dels'&&!x.e.priv)throw Error('no hay clave secreta para esa clave');
+   if(!await yes(o,'¿Borrar esta clave?'))continue;
+   if(c==='dels')delete x.e.priv;else KR.splice(KR.indexOf(x.e),1);sKR();print('gpg: clave borrada','ok')}return''}
+ case 'sign':case 'clear':case 'dsign':{const txt=await getData(o,inp),s=signer(r,o),sk=await unlock(s.e,o);let out;
+  if(c==='clear')out=await openpgp.sign({message:await openpgp.createCleartextMessage({text:txt}),signingKeys:sk,format:'armored'});
+  else out=await openpgp.sign({message:await openpgp.createMessage({text:txt}),signingKeys:sk,detached:c==='dsign',format:'armored'});
+  print(`gpg: firmado con la clave ${fp(s.pub).slice(-16)}`,'dim');
+  return emit(o,out,o.pos[0]&&o.pos[0]+(c==='dsign'?'.sig':c==='clear'?'.asc':'.gpg'))}
+ case 'enc':case 'se':{const txt=await getData(o,inp);if(!o.rec.length)throw Error('no hay destinatarios (usa -r id)');
+  const ek=o.rec.map(q=>{const m=match(r,q);if(!m.length)throw Error(`${q}: clave pública no encontrada`);return m[0].pub});
+  let sk;if(c==='se')sk=await unlock(signer(r,o).e,o);
+  const out=await openpgp.encrypt({message:await openpgp.createMessage({text:txt}),encryptionKeys:ek,signingKeys:sk,format:'armored'});
+  return emit(o,out,o.pos[0]&&o.pos[0]+'.gpg')}
+ case 'sym':{const txt=await getData(o,inp),p=await pass(o,'Frase de contraseña: ',true);
+  return emit(o,await openpgp.encrypt({message:await openpgp.createMessage({text:txt}),passwords:[p],format:'armored'}),o.pos[0]&&o.pos[0]+'.gpg')}
+ case 'aese':{const txt=await getData(o,inp),p=await pass(o,'Frase de contraseña AES: ',true);
+  return emit(o,await openpgp.encrypt({message:await openpgp.createMessage({text:txt}),passwords:[p],format:'armored',
+   config:{preferredSymmetricAlgorithm:openpgp.enums.symmetric.aes256,showVersion:false,showComment:false}}),o.pos[0]&&o.pos[0]+'.aes')}
+ case 'aesd':{const txt=await getData(o,inp),p=await pass(o,'Frase de contraseña AES: '),f=o.pos[0];let out;
+  if(/BEGIN AES-256-GCM/.test(txt))out=await aesD(txt,p);
+  else try{out=(await openpgp.decrypt({message:await openpgp.readMessage({armoredMessage:txt}),passwords:[p]})).data}
+  catch{throw Error('descifrado fallido: frase incorrecta o mensaje no válido')}
+  return emit(o,out,f&&(f.replace(/\.aes$/,'')||f)+(/\.aes$/.test(f)?'':'.out'))}
+ case 'dec':{const txt=await getData(o,inp),m=await openpgp.readMessage({armoredMessage:txt}),ids=m.getEncryptionKeyIDs(),opts={message:m,verificationKeys:r.map(x=>x.pub)};
+  const sym=m.packets.filterByTag(openpgp.enums.packet.symEncryptedSessionKey).length>0;let res;
+  if(ids.length){const cand=r.filter(x=>x.e.priv&&ids.some(i=>x.pub.getKeys(i).length));
+   if(!cand.length)throw Error('descifrado fallido: no hay clave secreta para este mensaje');opts.decryptionKeys=await unlock(cand[0].e,o)}
+  else if(sym)opts.passwords=[await pass(o,'Frase de contraseña: ')];
+  try{res=ids.length||sym?await openpgp.decrypt(opts):await openpgp.verify({message:m,verificationKeys:opts.verificationKeys})}
+  catch(e){throw Error('descifrado fallido: '+e.message)}
+  if(res.signatures.length)await report(res.signatures,r);
+  const f=o.pos[0];return emit(o,res.data,f&&(f.replace(/\.(gpg|asc|pgp)$/,'')||f)+(/\.(gpg|asc|pgp)$/.test(f)?'':'.out'))}
+ case 'ver':{const gf=n=>getF(n),vk=r.map(x=>x.pub);
+  const s=o.pos[0]?gf(o.pos[0]):inp??await stdin();let res;
+  if(/BEGIN PGP SIGNED MESSAGE/.test(s))res=await openpgp.verify({message:await openpgp.readCleartextMessage({cleartextMessage:s}),verificationKeys:vk});
+  else if(/BEGIN PGP SIGNATURE/.test(s)){const d=o.pos[1]?gf(o.pos[1]):(o.pos[0]&&inp?inp:await stdin());
+   res=await openpgp.verify({message:await openpgp.createMessage({text:d}),signature:await openpgp.readSignature({armoredSignature:s}),verificationKeys:vk})}
+  else res=await openpgp.verify({message:await openpgp.readMessage({armoredMessage:s}),verificationKeys:vk});
+  if(!res.signatures.length)throw Error('no se encontraron firmas válidas');
+  if(!await report(res.signatures,r))throw Error('la verificación falló');return''}
+ case 'send':{if(!o.pos.length)throw Error('indica la clave a enviar');
+  for(const x of pick(r,o.pos)){print(`gpg: enviando ${fp(x.pub).slice(-16)} a keys.openpgp.org (solo la parte pública)...`,'dim');
+   const j=await ks('/vks/v1/upload',{keytext:x.e.pub});
+   print(`gpg: clave ${j.key_fpr} subida`,'ok');
+   const un=Object.entries(j.status||{}).filter(([,s])=>s==='unpublished').map(([m])=>m);
+   if(un.length&&await yes(o,`Enviar correo de verificación a ${un.join(', ')} para publicar los UID?`)){
+    await ks('/vks/v1/request-verify',{token:j.token,addresses:un});print('gpg: correo de verificación enviado; abre el enlace para que la clave se pueda buscar por correo','ok')}
+   else if(un.length)print('gpg: el UID no está verificado: la clave solo se encuentra por huella hasta confirmarlo','dim')}return''}
+ case 'recv':case 'refresh':{const ids=c==='refresh'?r.map(x=>fp(x.pub)):o.pos;if(!ids.length)throw Error('indica un id o huella');
+  for(const id of ids)await addKeys(await fetchKey(id));return''}
+ case 'srch':{if(!o.pos.length)throw Error('indica un correo o huella');
+  for(const id of o.pos){const k=await rdK((await fetchKey(id).then(t=>t.match(/-----BEGIN[\s\S]*?KEY BLOCK-----/)&&t)));
+   print(`${algo(k)} ${day(k.getCreationTime())}\n  ${fp(k)}\n${uids(k).map(u=>'  uid '+u).join('\n')}`);print('Impórtala con: gpg --recv-keys '+fp(k),'dim')}return''}
+ case 'rev':{const x=pick(r,o.pos,true)[0];if(!x)throw Error('indica una clave secreta');
+  if(!x.e.rev)throw Error('no hay certificado de revocación guardado (solo se crea al generar la clave aquí)');
+  print('gpg: certificado de revocación. Guárdalo en un lugar seguro.','dim');return emit(o,x.e.rev)}
+ case 'pw':{const x=pick(r,o.pos,true)[0];if(!x)throw Error('indica una clave secreta');
+  const k=await unlock(x.e,o),np=await pass({},'Nueva frase de contraseña (vacía = ninguna): ',true);
+  x.e.priv=np?(await openpgp.encryptKey({privateKey:k,passphrase:np})).armor():k.armor();sKR();print('gpg: frase de contraseña cambiada','ok');return''}
+ }
+ throw Error('orden no implementada')}
+
+const B64=u=>{let s='';for(const x of u)s+=String.fromCharCode(x);return btoa(s)},UB=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+async function aesKey(p,salt){const m=await crypto.subtle.importKey('raw',new TextEncoder().encode(p),'PBKDF2',false,['deriveKey']);
+ return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:600000,hash:'SHA-256'},m,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
+async function aesD(t,p){const m=t.match(/BEGIN AES-256-GCM MESSAGE-----([\s\S]*?)-----END/);if(!m)throw Error('no es un mensaje AES-256-GCM válido');
+ const b=UB(m[1].replace(/\s/g,''));
+ try{return new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:b.slice(16,28)},await aesKey(p,b.slice(0,16)),b.slice(28)))}
+ catch{throw Error('descifrado fallido: frase incorrecta o datos alterados')}}
+async function ks(path,body){let res;
+ try{res=await fetch(KS+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})}
+ catch{throw Error('no se pudo conectar con keys.openpgp.org (red o CORS)')}
+ const j=await res.json().catch(()=>({}));if(!res.ok)throw Error('keys.openpgp.org: '+(j.error||res.status));return j}
+async function fetchKey(id){const h=id.replace(/^0x/i,'').replace(/\s/g,'');
+ const p=id.includes('@')?'by-email/'+encodeURIComponent(id):h.length===40?'by-fingerprint/'+h.toUpperCase():h.length===16?'by-keyid/'+h.toUpperCase():null;
+ if(!p)throw Error('usa una huella completa (40), un id largo (16) o un correo');
+ let res;try{res=await fetch(`${KS}/vks/v1/${p}`)}catch{throw Error('no se pudo conectar con keys.openpgp.org')}
+ if(!res.ok)throw Error(`${id}: no encontrada en keys.openpgp.org`);return res.text()}
+async function report(sigs,r){let ok=true;
+ for(const s of sigs){const id=s.keyID.toHex().toUpperCase(),x=r.find(x=>x.pub.getKeys(s.keyID).length);
+  try{await s.verified;print(`gpg: Firma correcta de "${x?uids(x.pub)[0]:id}"\ngpg:   clave ${id}`,'ok')}
+  catch{ok=false;print(x?`gpg: FIRMA INCORRECTA de "${uids(x.pub)[0]}"`:`gpg: no se puede comprobar la firma: falta la clave pública ${id} (prueba --recv-keys ${id})`,'err')}}
+ return ok}
+
+/* ---------- entrada ---------- */
+const H=[];let hi=0;
+I.addEventListener('keydown',async e=>{
+ if(e.key==='Enter'){e.preventDefault();const v=I.value;I.value='';
+  if(mode){const m=mode;if(m.multi){m.buf+=v+'\n';print(v)}else{mode=null;print(m.secret?m.q:m.q+v);reset();m.r(v)}return}
+  if(busy)return;print(PS+v,'p');if(v.trim()){H.push(v);hi=H.length;await run(v)}}
+ else if(e.ctrlKey&&e.key==='d'&&mode?.multi){e.preventDefault();const m=mode;mode=null;if(I.value){m.buf+=I.value+'\n';I.value=''}reset();m.r(m.buf.replace(/\n$/,''))}
+ else if(e.ctrlKey&&e.key==='c'&&!getSelection().toString()){e.preventDefault();I.value='';print('^C','dim');if(mode){const m=mode;mode=null;reset();m.j(Error('cancelado'))}}
+ else if(e.ctrlKey&&e.key==='l'){e.preventDefault();O.innerHTML=''}
+ else if(e.key==='ArrowUp'&&!mode){e.preventDefault();if(hi>0)I.value=H[--hi]}
+ else if(e.key==='ArrowDown'&&!mode){e.preventDefault();I.value=hi<H.length-1?H[++hi]:(hi=H.length,'')}});
+I.addEventListener('paste',e=>{if(mode?.multi){e.preventDefault();const t=e.clipboardData.getData('text');mode.buf+=t+(t.endsWith('\n')?'':'\n');print(t.replace(/\n$/,''))}});
+document.addEventListener('click',()=>{if(!getSelection().toString())I.focus()});
+reset();
+print('gpg-web: terminal GnuPG en tu navegador. Escribe help o gpg --help.','dim');
+print(KR.length?`Anillo de claves: ${KR.length} clave(s) guardada(s) en este navegador.`:'Anillo de claves vacío. Empieza con: gpg --gen-key','dim');
+if(typeof openpgp==='undefined')print('No se pudo cargar OpenPGP.js (¿sin conexión?). Recarga la página.','err');
+</script>
+</body>
+</html>
